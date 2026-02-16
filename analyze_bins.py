@@ -1,7 +1,8 @@
 import pandas as pd
+from pathlib import Path
 
 # --- Configuration ---
-csv_file_path = 'bus_data.csv'
+csv_file_path = Path('data/raw/bus_data.csv')
 num_bins = 5 # The number of colors/categories you want
 
 # --- Main Script ---

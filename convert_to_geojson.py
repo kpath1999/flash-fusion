@@ -1,9 +1,13 @@
 import csv
 import json
+from pathlib import Path
 
 # Input and output file names
-csv_file_path = 'bus_data.csv'
-geojson_file_path = 'bus_route.geojson'
+csv_file_path = Path('data/raw/bus_data.csv')
+geojson_file_path = Path('data/processed/bus_route.geojson')
+
+# Ensure output directory exists
+geojson_file_path.parent.mkdir(parents=True, exist_ok=True)
 
 # The main structure for our GeoJSON file
 geojson = {

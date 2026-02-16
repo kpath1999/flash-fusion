@@ -1,0 +1,26 @@
+{
+  "defaultIntent": "generalInfo",
+  "oosThreshold": 0.15,
+  "intents": [
+    {
+      "id": "aggressivePatterns",
+      "description": "Find aggressive or dangerous driving patterns",
+      "keywords": ["aggressive", "dangerous", "speeding", "harsh", "reckless", "behavior", "pattern"]
+    },
+    {
+      "id": "dwellTime",
+      "description": "Detect significant pauses or dwell events on routes",
+      "keywords": ["dwell", "pause", "stop", "wait", "delay", "linger", "idle"]
+    },
+    {
+      "id": "routeEfficiency",
+      "description": "Assess routing efficiency and detours",
+      "keywords": ["efficiency", "direct", "detour", "route", "deviation", "distance", "ratio"]
+    },
+    {
+      "id": "generalInfo",
+      "description": "Default summary or overview of bus data",
+      "keywords": ["summary", "overview", "information", "insight", "stats", "analysis"]
+    }
+  ]
+}

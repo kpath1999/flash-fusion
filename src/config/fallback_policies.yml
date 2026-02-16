@@ -1,0 +1,13 @@
+policies:
+  - id: "reject-oos"
+    match: "oos"   # triggered when intent parser flags out-of-scope
+    action: "reject"
+    message: "Query is outside current cluster/data coverage."
+  - id: "raw-data"
+    match: "missing-cluster-context"
+    action: "raw_query"
+    notes: "Fetch recent raw data slice and respond with minimal stats."
+  - id: "cheap-classifier"
+    match: "ambiguous"
+    action: "classify"
+    notes: "Run lightweight classifier to refine intent, then re-render prompt."
