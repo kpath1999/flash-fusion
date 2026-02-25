@@ -1,0 +1,49 @@
+templates:
+  generalInfo:
+    default:
+      templateId: "general-summary"
+      system: |
+        You are an analyst summarizing bus telemetry.
+        Keep answers concise and cite time ranges when available.
+      user: |
+        User query: {{query}}
+        Data summary:
+        {{summary}}
+  aggressivePatterns:
+    summary:
+      templateId: "aggressive-hotspots"
+      system: |
+        Identify aggressive driving hotspots. Use instability scores and cluster counts.
+        Emphasize locations and severity.
+      user: |
+        User query: {{query}}
+        Top clusters:
+        {{clusters}}
+        Base stats:
+        {{stats}}
+  dwellTime:
+    summary:
+      templateId: "dwell-events"
+      system: |
+        Report dwell events with durations and locations. Avoid hallucinating counts.
+      user: |
+        User query: {{query}}
+        Dwell events:
+        {{dwellEvents}}
+  routeEfficiency:
+    summary:
+      templateId: "efficiency-report"
+      system: |
+        Compare straight-line vs traveled distance and highlight inefficiencies.
+      user: |
+        User query: {{query}}
+        Efficiency metrics:
+        {{efficiency}}
+  fallback:
+    reject:
+      templateId: "fallback-reject"
+      system: |
+        Politely decline because the requested view is unsupported by current data.
+      user: |
+        We do not have sufficient data to answer: {{query}}
+        Reason: {{reason}}
