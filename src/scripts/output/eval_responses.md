@@ -289,3 +289,193 @@ Guardrail decision: REJECT: missing column 'longitude' for range query
 ```
 
 ---
+
+# Eval Run [2026-02-28 15:53:19] — /Users/kausar/Documents/flash-fusion/data/raw/bus_data.csv
+
+## Q1: How many times was the average acceleration exactly 9.344?
+
+| | Answer |
+|---|---|
+| **Ground Truth** | 59 |
+| **LLM** | [REJECTED] missing column 'accel_mean' is not sufficient to determine the count of exact matches, as it does not store the count of occurrences. |
+| **Latency** | 0.91s |
+
+**Agent Reasoning:**
+```
+Guardrail decision: REJECT: missing column 'accel_mean' is not sufficient to determine the count of exact matches, as it does not store the count of occurrences.
+```
+
+---
+## Q2: Tell me how often the acceleration variance was higher than 0.15.
+
+| | Answer |
+|---|---|
+| **Ground Truth** | 588 |
+| **LLM** | [REJECTED] missing column 'accel_variance' is not necessary for the query, but the query itself is answerable with the available columns. |
+| **Latency** | 0.64s |
+
+**Agent Reasoning:**
+```
+Guardrail decision: REJECT: missing column 'accel_variance' is not necessary for the query, but the query itself is answerable with the available columns.
+```
+
+---
+## Q3: Count the moments where the 99th percentile of Z-axis acceleration went above 11.
+
+| | Answer |
+|---|---|
+| **Ground Truth** | 153 |
+| **LLM** | [REJECTED] query requires speculative modeling/derivation not directly supported by available columns. |
+| **Latency** | 0.77s |
+
+**Agent Reasoning:**
+```
+Guardrail decision: REJECT: query requires speculative modeling/derivation not directly supported by available columns.
+```
+
+---
+## Q4: When did we see the highest 99th percentile X-axis acceleration, and what was that value?
+
+| | Answer |
+|---|---|
+| **Ground Truth** | 2.758 at 2025-06-06 16:30:37 |
+| **LLM** | The highest 99th percentile X-axis acceleration occurred on 2025-06-06 at 11:08:35, with a value of 2.145. |
+| **Latency** | 45.18s |
+
+**Agent Reasoning:**
+```
+Thought + Action: Thought: To find the maximum value of accel_stats_x_p99, I need to group the data by timestamp and then find the maximum value of accel_stats_x_p99 for each timestamp.
+
+Action: python_repl_ast
+Action Input: df.groupby('timestamp')['accel_stats_x_p99'].max()
+Action Input: df.groupby('timestamp')['accel_stats_x_p99'].max()
+
+Thought + Action: Thought: The result is a Series with the timestamp as the index and the maximum value of accel_stats_x_p99 as the value. However, the question asked for a SELECT statement, which typically returns a table with two columns: timestamp and max(accel_stats_x_p99).
+
+Action: python_repl_ast
+Action Input: df.groupby('timestamp')['accel_stats_x_p99'].max().reset_index()
+Action Input: df.groupby('timestamp')['accel_stats_x_p99'].max().reset_index()
+
+Final Answer: timestamp  accel_stats_x_p99
+0     2025-06-06 11:08:35              2.145
+1     2025-06-06 11:08:38              2.145
+2     2025-06-06 11:08:41              2.145
+3     2025-06-06 11:08:44              2.145
+4     2025-06-06 11:08:47              2.145
+...                   ...                ...
+1214  2025-06-06 16:36:22              1.992
+1215  2025-06-06 16:36:25              1.992
+1216  2025-06-06 16:36:28              1.992
+1217  2025-06-06 16:36:31              1.992
+1218  2025-06-06 16:36:34              1.992
+```
+
+---
+## Q5: What's the average for the 90th percentile of Y-axis acceleration?
+
+| | Answer |
+|---|---|
+| **Ground Truth** | 4.2193 |
+| **LLM** | [REJECTED] missing column for average calculation |
+| **Latency** | 17.92s |
+
+**Agent Reasoning:**
+```
+Guardrail decision: REJECT: missing column for average calculation
+```
+
+---
+## Q6: How much does the average acceleration value typically vary?
+
+| | Answer |
+|---|---|
+| **Ground Truth** | 0.048388 |
+| **LLM** | [REJECTED] missing column 'accel_stats_x_p50' or 'accel_stats_y_p50' or 'accel_stats_z_p50' |
+| **Latency** | 19.89s |
+
+**Agent Reasoning:**
+```
+Guardrail decision: REJECT: missing column 'accel_stats_x_p50' or 'accel_stats_y_p50' or 'accel_stats_z_p50'
+```
+
+---
+## Q7: How many unique places did the bus visit?
+
+| | Answer |
+|---|---|
+| **Ground Truth** | 1218 |
+| **LLM** | [REJECTED] Query requires concepts not present in dataset: bus, places |
+| **Latency** | 11.86s |
+
+**Agent Reasoning:**
+```
+Unmappable concepts detected: ['bus', 'places']
+```
+
+---
+## Q8: Where does the bus spend the most time? Give me the top 5 spots.
+
+| | Answer |
+|---|---|
+| **Ground Truth** |  latitude  longitude  count
+33.773378 -84.399111      2
+33.772734 -84.397084      1
+33.772763 -84.397208      1
+33.772775 -84.396959      1
+33.772784 -84.397328      1 |
+| **LLM** | [REJECTED] Query requires concepts not present in dataset: bus |
+| **Latency** | 13.01s |
+
+**Agent Reasoning:**
+```
+Unmappable concepts detected: ['bus']
+```
+
+---
+## Q9: When did recording start, and what was the average acceleration then?
+
+| | Answer |
+|---|---|
+| **Ground Truth** | timestamp=2025-06-06 11:08:35, accel_mean=9.269 |
+| **LLM** | Unfortunately, it seems that the analysis was unable to complete due to a time or iteration limit. As a result, I don't have enough information to provide an answer to your question. |
+| **Latency** | 66.85s |
+
+**Agent Reasoning:**
+```
+Thought + Action: Thought: Since the task is to group by timestamp, it seems like we're trying to aggregate the data by timestamp. However, the accel_mean is a scalar value and doesn't need grouping. It seems like the task is to simply select the timestamp and accel_mean columns.
+
+Action: python_repl_ast
+Action Input: df[['timestamp', 'accel_mean']]
+Action Input: df[['timestamp', 'accel_mean']]
+Thought + Action: Question: SELECT timestamp, accel_mean FROM dataset GROUP BY timestamp
+Thought: Since the task is to group by timestamp, it seems like we're trying to aggregate the data by timestamp. However, the accel_mean is a scalar value and doesn't need grouping. It seems like the task is to simply select the timestamp and accel_mean columns.
+
+Action: python_repl_ast
+Action Input: df[['timestamp', 'accel_mean']]
+Action Input: df[['timestamp', 'accel_mean']]
+Thought + Action: Question: SELECT timestamp, accel_mean FROM dataset GROUP BY timestamp
+Thought: Since the task is to group by timestamp, it seems like we're trying to aggregate the data by timestamp. However, the accel_mean is a scalar value and doesn't need grouping. It seems like the task is to simply select the timestamp and accel_mean columns.
+
+Action: python_repl_ast
+Action Input: df[['timestamp', 'accel_mean']]
+Action Input: df[['timestamp', 'accel_mean']]
+Final Answer: Agent stopped due to iteration limit or time limit.
+```
+
+---
+## Q10: How many readings happened when the bus was between longitude -84.39 and -84.38?
+
+| | Answer |
+|---|---|
+| **Ground Truth** | 243 |
+| **LLM** | [REJECTED] Query requires concepts not present in dataset: bus, readings |
+| **Latency** | 12.72s |
+
+**Agent Reasoning:**
+```
+Unmappable concepts detected: ['bus', 'readings']
+```
+
+---
+
+**Latency summary:** avg=18.97s, min=0.64s, max=66.85s

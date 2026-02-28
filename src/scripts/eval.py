@@ -1,7 +1,7 @@
 """
 eval.py
 -------
-Single script: runs each test query through the Gemini 2.5 pandas dataframe
+Single script: runs each test query through the Llama 3.1 8B pandas dataframe
 agent, computes the pandas ground-truth answer, and prints a side-by-side
 comparison.
 
@@ -17,11 +17,36 @@ Usage:
 
     # when the queries are beyond the scope..
     python eval.py --out_of_scope
+
+
+DESCRIPTION:
+i) Inferring analytical intent and query rewriting
+When a user submits an ambiguous natural language query (e.g., "tell me where the bus movements were jerkiest"),
+the system first resolves the user's intent against the actual schema of the dataset. It uses an LLM-based
+query rewriter equipped with pre-computed metadata about the dataset's columns (data types, min/max values, unique
+counts). The rewriter maps the loose human vocabulary in the query ti exact, available column names (e.g., mapping
+"jerkiest" to the "accel_variance" column). This transforms the ambiguous prompt into a precise, column-grounded query.
+
+ii) Integrated guardrail and data extraction
+Focuses on feasibility, rejects queries that require external data (e.g., "what was the weather?") or speculative
+derivations that the available sensors cannot support. Once approved, the query is handed to a Pandas DataFrame Agent.
+Executes python code against the IoT CSV dataframe.
+
+iii) Natural language contextualization
+The raw data returned from the Pandas execution (e.g., a list of coordinates with high variance) is
+transformed back into a human-readable format.
+GOAL [will take care of this with tavily];
+TODO (ignore for now)]: map the raw data points to meaningful real-world anchors, such as campus specific landmarks or timestamps
+LLM synthesizes this contextualized data into a natural language response that matches the conversational style 
+of the original user query, providing a direct answer without requiring the user to interpret technical coordinates
+or statistics.
 """
 
 import os
 import sys
+import time
 import argparse
+import warnings
 import pandas as pd
 from datetime import datetime
 from langchain_groq import ChatGroq
@@ -30,6 +55,11 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.agents import AgentAction, AgentFinish
+
+from queries import (
+    TEST_QUERIES, QUERY_INTENT, OUT_OF_SCOPE,
+    GROUND_TRUTH_FNS, GT_OUT_OF_SCOPE,
+)
 
 # --- Configuration ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -43,107 +73,61 @@ LOG_FILE   = os.path.join(OUTPUT_DIR, "eval_responses.md")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# ====================================================
-# TEST QUERIES
-# ====================================================
-
-TEST_QUERIES = [
-    "How many rows have accel_mean exactly equal to 9.344?",
-    "How many rows have accel_variance greater than 0.15?",
-    "Count the data points where accel_stats_z_p99 exceeds 11.0.",
-    "What is the maximum value of accel_stats_x_p99 and its corresponding timestamp?",
-    "Calculate the average accel_stats_y_p90 across the dataset.",
-    "What is the standard deviation of accel_mean?",
-    "Count the number of unique latitude-longitude locations.",
-    "Find the top 5 most frequent locations by grouping latitude and longitude.",
-    "What is the earliest timestamp and its accel_mean value?",
-    "How many data points have longitude between -84.39 and -84.38?",
-]
-
-OUT_OF_SCOPE = [
-    # missing columns
-    "What was the average vehicle speed during high accel_variance?",
-    "At what timestamps did the battery level drop below 20%?",
-    "How many unique driver IDs are in the dataset?",
-    "What is the gyroscope mean value for accel_mean = 9.344?",
-    # external data required
-    "What was the weather at the location with maximum accel_stats_z_p99?",
-    "Calculate total distance traveled between consecutive timestamps.",
-    "Did the vehicle stop at any traffic lights based on longitude?",
-    # impossible derivations
-    "How many potholes were hit based on accel_stats_x_p90 spikes?",
-    "Predict the next latitude from current acceleration trends.",
-    "What is the fuel efficiency during periods of low accel_variance?",
-]
 
 # ====================================================
-# Ground-truth computations (one per query, same order)
+# Schema-aware query rewriter
+# Runs BEFORE the guardrail:
+# (i) takes an ambiguous natural language query
+# (ii) inspects the actual column names + dtypes + stats
+# (iii) rewrites it into a precise, column-grounded question
 # ====================================================
 
-def gt_accel_mean_exact(df):
-    count = (df["accel_mean"] == 9.344).sum()
-    return str(count)
+def build_column_metadata(df):
+    """
+    Pre-compute once at load time. Returns a dict of column ->
+    {dtype, min, max, n_unique, sample_values}.
+    This is O(N) but done once; subsequent LLM calls use cached metadata.
+    """
+    meta = {}
+    for col in df.columns:
+        series = df[col].dropna()
+        entry = {"dtype": str(df[col].dtype), "n_unique": series.nunique()}
+        if pd.api.types.is_numeric_dtype(series):
+            entry.update({"min": series.min(), "max": series.max(), "mean": round(series.mean(), 4)})
+        else:
+            entry["sample_values"] = series.head(3).tolist()
+        meta[col] = entry
+    return meta
 
-def gt_variance_above(df):
-    count = (df["accel_variance"] > 0.15).sum()
-    return str(count)
 
-def gt_z_p99_above(df):
-    count = (df["accel_stats_z_p99"] > 11.0).sum()
-    return str(count)
+REWRITER_SYSTEM = """
+You are an expert semantic query rewriter for a structured tabular IoT sensor dataset.
 
-def gt_max_x_p99(df):
-    idx = df["accel_stats_x_p99"].idxmax()
-    return f"{df.loc[idx, 'accel_stats_x_p99']} at {df.loc[idx, 'timestamp']}"
+You are given:
+* A user query written in natural language.
+* Available dataset columns and their metadata (names, descriptions, statistics):
+{column_metadata}
 
-def gt_avg_y_p90(df):
-    return f"{df['accel_stats_y_p90'].mean():.4f}"
+Your task is to transform the user query into a schema-aligned, unambiguous version.
 
-def gt_std_accel_mean(df):
-    return f"{df['accel_mean'].std():.6f}"
+Step-by-step instructions:
+1. Identify every distinct semantic concept in the user query. Concepts include entities (e.g., device, room, sensor),
+measurements (e.g., temperature, humidity), time references (e.g., yesterday, last 24 hours), conditions (e.g, above,
+below, between), aggregations (e.g., average, max, count), filters and groupings.
+2. Map each concept to the closest semantically matching column. Use column descriptions and statistics to guide mapping.
+Prefer exact semantic matches, standardized naming conventions, and units consistency (e.g., °C vs °F). If multiple columns
+are similar, choose the most specific and least ambiguous match.
+3. In terms of disambiguation, replace all vague or generic terms with exact column names. Preserve logical structure
+(filters, aggregations, time constraints). Do NOT invent new columns. Do NOT assume mappings without reasonable semantic
+similarity.
+4. If a concept has no plausible mapping to any available column, do NOT remove it silently. Add it the UNMAPPABLE list.
+Only include concepts that truly lack reasonable schema alignment.
 
-def gt_unique_locations(df):
-    count = len(df[["latitude", "longitude"]].drop_duplicates())
-    return str(count)
+Output rules:
+REWRITTEN: <new precise query using exact column names>
+UNMAPPABLE: <comma-separated list of unmappable concepts, or NONE>
+"""
 
-def gt_top5_locations(df):
-    top5 = df.groupby(["latitude", "longitude"]).size().nlargest(5).reset_index(name="count")
-    return top5.to_string(index=False)
-
-def gt_earliest_timestamp(df):
-    row = df.sort_values("timestamp").iloc[0]
-    return f"timestamp={row['timestamp']}, accel_mean={row['accel_mean']}"
-
-def gt_lon_range(df):
-    count = df[(df["longitude"] >= -84.39) & (df["longitude"] <= -84.38)].shape[0]
-    return str(count)
-
-GROUND_TRUTH_FNS = [
-    gt_accel_mean_exact,
-    gt_variance_above,
-    gt_z_p99_above,
-    gt_max_x_p99,
-    gt_avg_y_p90,
-    gt_std_accel_mean,
-    gt_unique_locations,
-    gt_top5_locations,
-    gt_earliest_timestamp,
-    gt_lon_range,
-]
-
-# Ground truth responses for out-of-scope queries - all should indicate insufficient data
-GT_OUT_OF_SCOPE = [
-    "Dataset lacks vehicle speed column and deriving speed via double-integration is not feasible",
-    "Dataset lacks battery level column - cannot track battery status",
-    "Dataset lacks driver ID column - cannot count unique drivers",
-    "Dataset lacks gyroscope data - only has accelerometer statistics",
-    "Dataset lacks weather information - cannot correlate with external weather data",
-    "Dataset lacks detailed positional tracking - cannot calculate distance between sparse GPS points",
-    "Dataset lacks traffic infrastructure data - cannot identify traffic light locations",
-    "Dataset lacks road condition sensors - cannot detect potholes from acceleration alone",
-    "Dataset lacks sufficient temporal density - cannot reliably predict future positions",
-    "Dataset lacks engine/fuel consumption data - cannot determine fuel efficiency",
-]
 
 # ====================================================
 # Callback handler to capture agent reasoning trace
@@ -168,9 +152,10 @@ class ThinkingCaptureHandler(BaseCallbackHandler):
     def get_trace(self) -> str:
         return "\n".join(self.steps) if self.steps else "(no steps captured)"
 
-
 def build_schema_summary(dataframe):
-    """Auto-derive column summary from any dataframe — no hardcoding."""
+    """Auto-derive column summary from any dataframe — no hardcoding.
+    Note: kept alongside build_column_metadata because the guardrail prompt
+    needs a concise dtype+example view, while the rewriter needs richer stats."""
     lines = []
     for col in dataframe.columns:
         dtype = str(dataframe[col].dtype)
@@ -189,20 +174,71 @@ def init_llm_components(df):
         temperature=0.0,
     )
 
+    # Pre-compute column metadata (min, max, unique counts) once at load time;
+    # fed as context to the rewriter so it can map ambiguous terms to real columns.
+    column_metadata = build_column_metadata(df)
+
+    # Build the rewriter chain (needs the live llm instance)
+    rewriter_chain = (
+        ChatPromptTemplate.from_messages([
+            ("system", REWRITER_SYSTEM),
+            ("human", "Original query: {query}"),
+        ])
+        | llm
+        | StrOutputParser()
+    )
+
+    def rewrite_query(user_query):
+        """
+        Schema-aware query rewriter.
+        Returns (rewritten_query: str, unmappable: list[str])
+        """
+        meta_str = "\n".join(
+            f"- '{col}': {info}" for col, info in column_metadata.items()
+        )
+        response = rewriter_chain.invoke({
+            "query": user_query,
+            "column_metadata": meta_str,
+        }).strip()
+
+        rewritten = user_query      # fallback
+        unmappable = []
+
+        for line in response.splitlines():
+            if line.startswith("REWRITTEN:"):
+                rewritten = line.split("REWRITTEN:", 1)[1].strip()
+            elif line.startswith("UNMAPPABLE:"):
+                raw = line.split("UNMAPPABLE:", 1)[1].strip()
+                if raw.upper() != "NONE":
+                    unmappable = [c.strip() for c in raw.split(",")]
+
+        return rewritten, unmappable
+
+    # NL response contextualizer — converts raw agent output into a
+    # human-readable natural language answer
+    contextualizer_chain = (
+        ChatPromptTemplate.from_messages([
+            ("system",
+             "You are a data analyst assistant. Given the user's original question "
+             "and the raw analytical result, produce a clear, concise natural language "
+             "response that directly answers the question. Do NOT include code or "
+             "technical details — just the answer in plain English."),
+            ("human",
+             "Question: {question}\n\nRaw result: {raw_answer}"),
+        ])
+        | llm
+        | StrOutputParser()
+    )
+
     col_list     = ", ".join(df.columns)
     sample_rows  = df.head(2).to_dict(orient="records")
     total_rows   = len(df)
 
     """
-    i) TODO -- one idea...
+    TODO [IGNORE] -- one idea...
     RAG for schema: creating a tiny vector store of column descriptions
     we search for relevant columns first; if none match the query keywords, REJECT
     but i feel build_schema_summary(df) doesn't take all that long anyway
-
-    ii) TODO -- another idea...
-    some pre-computation can be done
-    the metadata (min, max, unique counts) for every column can be computed during loading
-    this metadata would be fed as context
     """
 
     schema = build_schema_summary(df)
@@ -255,7 +291,7 @@ Output contract (MUST follow exactly, single line):
     agent = create_pandas_dataframe_agent(
         llm,
         df,
-        verbose=True,  # disable verbose to reduce I/O overhead
+        verbose=False,  # disable verbose to reduce I/O overhead
         allow_dangerous_code=True,
         agent_type="zero-shot-react-description",
         prefix=prefix_prompt,
@@ -266,29 +302,52 @@ Output contract (MUST follow exactly, single line):
     )
 
     def ask_agent(user_query):
-        decision = guardrail_chain.invoke({"query": user_query}).strip()
+        t0 = time.time()
+
+        # stage 0: rewrite query -> column-grounded version
+        rewritten_query, unmappable = rewrite_query(user_query)
+
+        # If the rewriter found unmappable concepts, reject early
+        if unmappable:
+            reason = f"Query requires concepts not present in dataset: {', '.join(unmappable)}"
+            latency = time.time() - t0
+            return (
+                f"[REJECTED] {reason}",
+                f"Unmappable concepts detected: {unmappable}",
+                latency,
+            )
+
+        decision = guardrail_chain.invoke({"query": rewritten_query}).strip()
+
         if decision != "PROCEED":
+            latency = time.time() - t0
             if decision.startswith("REJECT:"):
                 reason = decision.split("REJECT:", 1)[1].strip()
-                return f"[REJECTED] {reason}", f"Guardrail decision: {decision}"
-            return f"[REJECTED] {decision}", f"Guardrail decision: {decision}"
+                return f"[REJECTED] {reason}", f"Guardrail decision: {decision}", latency
+            return f"[REJECTED] {decision}", f"Guardrail decision: {decision}", latency
 
-        # Pass query directly - schema already in prefix_prompt, no need to repeat
+        # Pass rewritten query — the rewriter already resolved typos / ambiguous
+        # column references (e.g. 'accl variance' → 'accel_variance')
         handler = ThinkingCaptureHandler()
         try:
-            # NAIVE: relies on the LLM to blindly write correct Pandas syntax
-            # not understanding the stat distribution or indexing of the data beforehand
-            # treats the dataset as a black box until code execution
-            # q: say my query said 'accl variance' instead of the proper col name; robust to it?
-            result = agent.invoke(user_query, config={"callbacks": [handler]})
-            return result["output"], handler.get_trace()
-        except Exception as e:
-            return f"[ERROR] {e}", handler.get_trace()
+            result = agent.invoke(rewritten_query, config={"callbacks": [handler]})
+            raw_answer = result["output"]
 
-    # TODO - q: why does the llm take so long; latency is high; reducing it could be flash-fusion's contribution
+            # Contextualize: convert raw agent output to natural language
+            nl_answer = contextualizer_chain.invoke({
+                "question": user_query,
+                "raw_answer": raw_answer,
+            }).strip()
+
+            latency = time.time() - t0
+            return nl_answer, handler.get_trace(), latency
+        except Exception as e:
+            latency = time.time() - t0
+            return f"[ERROR] {e}", handler.get_trace(), latency
+
+    # TODO [IGNORE] - q: why does the llm take so long; latency is high; reducing it could be flash-fusion's contribution
     # think about it...this is our naive baseline (RAG, SQL, VocalDB)
     # IDEA: based on the query, the data is organized in a specific manner and then fed to the pandas agent
-    # TODO - log the latencies for each query
     return ask_agent
 
 # ====================================================
@@ -299,13 +358,20 @@ def log_results(results, csv_path):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(f"\n# Eval Run [{timestamp}] — {csv_path}\n\n")
-        for i, (query, gt, llm_ans, thinking) in enumerate(results, 1):
+        for i, (query, gt, llm_ans, thinking, latency) in enumerate(results, 1):
             f.write(f"## Q{i}: {query}\n\n")
             f.write(f"| | Answer |\n|---|---|\n")
             f.write(f"| **Ground Truth** | {gt} |\n")
-            f.write(f"| **LLM** | {llm_ans} |\n\n")
+            f.write(f"| **LLM** | {llm_ans} |\n")
+            f.write(f"| **Latency** | {latency:.2f}s |\n\n")
             f.write(f"**Agent Reasoning:**\n```\n{thinking}\n```\n\n")
             f.write("---\n")
+
+        # Summary stats
+        latencies = [r[4] for r in results]
+        avg_lat = sum(latencies) / len(latencies) if latencies else 0
+        f.write(f"\n**Latency summary:** avg={avg_lat:.2f}s, "
+                f"min={min(latencies):.2f}s, max={max(latencies):.2f}s\n")
     print(f"\nResults logged → {LOG_FILE}")
 
 
@@ -331,21 +397,23 @@ def run(csv_path, out_of_scope=False):
         ground_truths = GT_OUT_OF_SCOPE
         print("\n🔍 Evaluating OUT-OF-SCOPE queries (should be rejected)...")
     else:
-        queries = TEST_QUERIES
+        # User requested to test rewriter with conversational queries instead of standard ones
+        queries = QUERY_INTENT      # you can swap this out with TEST_QUERIES instead
         ground_truths = [gt_fn(df) for gt_fn in GROUND_TRUTH_FNS]
-        print("\n📊 Evaluating STANDARD queries...")
+        print("\n📊 Evaluating CONVERSATIONAL queries (testing rewriter)...")
 
     for i, (query, gt_answer) in enumerate(zip(queries, ground_truths), 1):
         print(f"\n{'─' * 60}")
         print(f"Q{i}: {query}")
         print(f"{'─' * 60}")
 
-        llm_answer, thinking = ask_agent(query)
+        llm_answer, thinking, latency = ask_agent(query)
 
         print(f"  GROUND TRUTH : {gt_answer}")
         print(f"  LLM ANSWER   : {llm_answer}")
+        print(f"  LATENCY      : {latency:.2f}s")
 
-        results.append((query, gt_answer, llm_answer, thinking))
+        results.append((query, gt_answer, llm_answer, thinking, latency))
 
     log_results(results, csv_path)
     return results
